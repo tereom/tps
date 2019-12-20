@@ -1,0 +1,160 @@
+---
+title: "TPS"
+date: "11/29/2019"
+output: html_document
+---
+
+```{r setup, echo = FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+```
+
+```{r}
+library(knitr)
+library(kableExtra)
+library(tidyverse)
+library(sf)
+library(here)
+source(here::here("src", "funciones.R"))
+
+
+tps <- read_sf(here("datos", "TPS_entrega", "Sitios_Intervencion_TPS.shp")) %>% 
+    select(-area)
+# eliminar coordenada z (polígono en 3D)
+tps_r2 <- st_zm(tps)
+rm(tps)
+
+# calcular buffer
+tps_buffer <- st_buffer(select(tps_r2, -SUP_HA), dist = 12000) %>%
+    mutate(area = st_area(.)) %>%
+    st_difference(st_geometry(tps_r2)) %>%
+    mutate(area_anillo = st_area(.)) %>%
+    filter(area != area_anillo) %>%
+    select(-area) %>%
+    mutate(SUP_HA = area_anillo / 10000) %>% 
+    select(-area_anillo)
+```
+
+### Descriptivo
+
+Hay 14 TPS, alrededor de cada uno construimos un *buffer* con 
+ancho de 12 km, el tamaño de las mismas varía, tenemos:
+
+
+```{r}
+tps_df <- tps_r2 %>% 
+    st_drop_geometry() %>% 
+    add_column(TIPO = "TPS")
+tps_buffer_df <- tps_buffer %>% 
+    st_drop_geometry() %>% 
+    add_column(TIPO = "Periferia")
+
+tps_all_df <- tps_df %>% 
+    bind_rows(tps_buffer_df)
+
+tps_all_df %>% 
+    group_by(TIPO) %>% 
+    summarise(
+        min_area = min(SUP_HA), 
+        max_area = max(SUP_HA), 
+        median_area = median(SUP_HA)
+    ) %>% 
+    arrange(desc(TIPO)) %>% 
+    kable(align = c("r", "c", "c", "c"), 
+        col.names = c("", "Min (ha)", "Max (ha)", "Mediana (ha)")) %>% 
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+        position = "left", font_size = 12, full_width = FALSE) 
+```
+
+Y por TPS,
+
+```{r}
+tps_all_df %>% 
+    pivot_wider(id_cols = c(SITINT_TPS, REG_TPS), names_from = TIPO, 
+        values_from = SUP_HA) %>% 
+    arrange(-TPS) %>% 
+    kable("html", align = c("r", "c", "c", "c"), 
+        col.names = c("SITINT TPS", "Región", "TPS (ha)", "Periferia (ha)")) %>% 
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                position = "left", font_size = 12, full_width = FALSE) 
+```
+
+
+### Cobertura de suelo 
+
+#### Clases de cobertura
+
+La clasificación de la cobertura de suelo se realiza con un algoritmo 
+automatizado, que genera un mapa con resolución espacial de 5 m^2^, construido a 
+partir de imágenes Rapid Eye correspondientes al año 2015.
+
+</br>
+
+El siguiente mapa muestra el mapa MADMEX (8 clases) y los TPS.
+
+```{r madmex_map, echo =FALSE}
+mapa("mex_RE_2015_8_clases", estilos_df)
+```
+
+Podemos ver la composición para cada una de las TPS, usando una desagregación 
+más fina de las clases, en esta caso 17 clases, en el año 2018:
+
+```{r, fig.height=9, fig.width=8.5}
+area_madmex <- read_csv(here("datos", "area_madmex_sentinel_17_2018.csv")) %>% 
+    left_join(tab_clases_17, by = c("GRIDCODE" = "clase")) %>% 
+    left_join(tps_df) %>% 
+    mutate(SITINT_TPS = reorder(SITINT_TPS, prop_area, max))
+ggplot(area_madmex, aes(x = reorder(descrip, prop_area), 
+    y = prop_area, fill = REG_TPS)) +
+    geom_col(alpha = 0.8) + 
+    coord_flip() +
+    facet_wrap(~SITINT_TPS, ncol = 4) +
+    labs(title = "Composición clases MAD-Mex", y = "%", x = "", 
+        fill = "Región") +
+    theme(axis.text.y = element_text(size = 6))
+```
+
+
+#### Pérdida de cobertura 
+
+En la siguiente figura se grafica la pérdida (como porcentaje del área total)
+para cada TPS y para la periferia de cada una.
+
+```{r, fig.width =8.5, fig.height=6.5}
+perdida_anual <- read_csv(here("entregas", "perdida_tps_anual.csv")) %>% 
+    mutate(stint_tps = reorder(SITINT_TPS, perdida_prop))
+
+ggplot(perdida_anual, aes(x = year_loss, y = perdida_prop, color = tipo)) +
+    geom_line() +
+    facet_wrap(~stint_tps, ncol = 4) +
+    geom_text(data = filter(perdida_anual, tipo == "TPS", year_loss == 2001), 
+        aes(x = 2001, y = 3, label = REG_TPS), hjust = 0, size = 2.5, 
+        color  = "black") +
+    labs(title = "Pérdida de cobertura boscosa", 
+        subtitle = "% perdido anualmente", x = "año", y = "% del área total")
+```
+
+### Integridad Ecosistémica
+
+A continuación mostramos el mapa de integridad ecosistémica.
+
+```{r ie_map}
+mapa("mex_ie_2014_250m", estilos_df)
+```
+
+
+Y podemos comparar la distribución del índice de IE dentro de los TPS. En cada
+TPS calculamos la mediana de integridad y los cuantiles 25 y 75 %, en la grafica
+de abajo el ínidice se multiplicó por cien, de tal manera que la máxima 
+integridad es 100 y la menor 0.
+
+```{r, fig.height=3.5, fig.width=6}
+ie_stats <- read_csv(here("datos", "ie_stats.csv")) %>% 
+    left_join(st_drop_geometry(tps_r2), by = "SITINT_TPS")
+
+ggplot(ie_stats, aes(x = reorder(SITINT_TPS, median_ie), y = median_ie, 
+    ymax = iq_075, ymin = iq_025)) +
+    geom_pointrange(aes(color = REG_TPS)) +
+    labs(y = "", x = "TPS", title = "Distribución de IE", 
+        subtitle = "Mediana y rango intercuantílico")
+```
+
